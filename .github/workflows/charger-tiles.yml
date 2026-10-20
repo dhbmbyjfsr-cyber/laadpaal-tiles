@@ -14,7 +14,7 @@ on:
         default: "europe"
       min_count:
         description: "Refuse to publish below this many chargers"
-        default: "300000"
+        default: "120000"
 
 permissions:
   contents: read
@@ -31,7 +31,7 @@ jobs:
     timeout-minutes: 340
     env:
       PARENTS: ${{ inputs.parents || 'europe' }}
-      MIN_COUNT: ${{ inputs.min_count || '300000' }}
+      MIN_COUNT: ${{ inputs.min_count || '120000' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

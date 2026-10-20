@@ -1,0 +1,91 @@
+# Weekly OSM charger tiles for Laadpaalprijzen → GitHub Pages.
+# Goes in the PUBLIC repo laadpaal-tiles as .github/workflows/charger-tiles.yml,
+# next to scripts/ (copies of api/scripts/build_charger_tiles.py,
+# geofabrik_regions.py and pbf_chargers_geojsonseq.py). See tiles/README.md.
+name: charger-tiles
+
+on:
+  schedule:
+    - cron: "17 2 * * 1" # Monday 02:17 UTC
+  workflow_dispatch:
+    inputs:
+      parents:
+        description: "Geofabrik parents, space separated (europe, us, canada, ...)"
+        default: "europe"
+      min_count:
+        description: "Refuse to publish below this many chargers"
+        default: "300000"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    env:
+      PARENTS: ${{ inputs.parents || 'europe' }}
+      MIN_COUNT: ${{ inputs.min_count || '300000' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq osmium-tool
+          pip install -q "osmium>=3.7,<5"
+      - name: Extracts → chargers (one country at a time, ~14 GB disk)
+        run: |
+          set -uo pipefail
+          mkdir -p work
+          curl -sfL --retry 5 -o work/index.json https://download.geofabrik.de/index-v1.json
+          : > work/regions.txt
+          for parent in $PARENTS; do
+            python3 scripts/geofabrik_regions.py work/index.json "$parent" --list > work/list.txt
+            python3 scripts/geofabrik_regions.py work/index.json "$parent" --bboxes > work/bboxes.txt
+            while read -r id url; do
+              ok=0
+              for try in 1 2 3; do
+                if curl -sfL --retry 3 -o work/x.pbf "$url" \
+                  && osmium tags-filter work/x.pbf nwr/amenity=charging_station -o work/x.f.pbf --overwrite \
+                  && python3 scripts/pbf_chargers_geojsonseq.py work/x.f.pbf "work/$id.geojsonseq"; then
+                  ok=1; break
+                fi
+                sleep 60
+              done
+              rm -f work/x.pbf work/x.f.pbf
+              # A region only counts as covered when its extract made it.
+              if [ "$ok" = 1 ]; then grep "^$id " work/bboxes.txt >> work/regions.txt
+              else echo "::warning::$id failed, its area falls back to live OSM in the app"; fi
+            done < work/list.txt
+          done
+      - name: Tiles
+        run: |
+          set -euo pipefail
+          args=()
+          for f in work/*.geojsonseq; do args+=(--geojsonseq "$f"); done
+          python3 scripts/build_charger_tiles.py --out site "${args[@]}" \
+            --regions-file work/regions.txt --min-count "$MIN_COUNT"
+          touch site/.nojekyll
+          du -sh site; find site -type f | wc -l
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
